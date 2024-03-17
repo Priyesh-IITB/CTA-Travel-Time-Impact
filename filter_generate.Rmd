@@ -1,0 +1,198 @@
+---
+title: "filter_generate"
+author: "Priyesh Verma"
+date: "2024-03-16"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# ==============================
+# Load Required Libraries
+# ==============================
+library(dplyr)
+library(readr)
+```
+
+```{r}
+# ==============================
+# SECTION 1: Load and Preprocess Data
+# ==============================
+
+# Load AVL data for October 19, 2017
+oct19 <- read_csv("avl_10_19_17.csv")
+
+# Load GTFS trips data
+gtfs_trips <- read_csv("gtfs_trips_oct_17.txt", col_names = TRUE, col_types = cols(
+  route_id = col_character(),
+  service_id = col_character(),
+  trip_id = col_character(),
+  schd_trip_id = col_character()
+))
+
+# Group AVL data by trip_id
+grouped_avl <- group_by(oct19, trip_id)
+```
+
+Section 1: Load and Preprocess Data
+
+- Load the AVL data for October 19, 2017, from the avl_10_19_17.csv file.
+- Load the GTFS trips data from the gtfs_trips_oct_17.txt file, specifying column types.
+- Group the AVL data by trip_id for easier iteration.
+
+```{r}
+# ==============================
+# SECTION 2: Create trips.csv
+# ==============================
+
+# Initialize a data frame to store trip information
+avl_trip_df <- data.frame(
+  route_id = character(),
+  service_id = character(),
+  trip_id = character(),
+  stringsAsFactors = FALSE
+)
+
+# Iterate over each trip_id group in the AVL data
+for (trip_id in unique(oct19$trip_id)) {
+  group <- filter(grouped_avl, trip_id == !!trip_id)
+  
+  # Find matching rows in the GTFS trips data based on schd_trip_id
+  match_rows <- gtfs_trips %>%
+    filter(schd_trip_id == as.character(trip_id))
+  
+  # If matching rows are found, append the trip information to the data frame
+  if (nrow(match_rows) > 0) {
+    avl_trip_df <- rbind(avl_trip_df, match_rows[, c("route_id", "service_id", "trip_id")])
+  }
+}
+
+# Save the trip information as trips.csv
+write_csv(avl_trip_df, "trips.csv")
+```
+
+Section 2: Create trips.csv
+
+- Initialize a data frame avl_trip_df to store the trip information.
+- Iterate over each unique trip_id in the AVL data.
+- Find matching rows in the GTFS trips data based on schd_trip_id.
+- If matching rows are found, append the trip information to the avl_trip_df data frame.
+- Save the avl_trip_df data frame as trips.csv.
+
+```{r}
+# ==============================
+# SECTION 3: Create stop_times.csv
+# ==============================
+
+# Load valid stop IDs from GTFS stops.txt
+valid_stops <- read_csv('gtfs-10-22-17/stops.txt')
+gtfs_stops <- unique(valid_stops$stop_id)
+
+# Initialize a data frame to store stop time information
+stop_times <- data.frame(
+  trip_id = character(),
+  arrival_time = character(),
+  departure_time = character(),
+  stop_id = numeric(),
+  stop_sequence = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# Iterate over each trip_id group in the AVL data
+for (trip_id in unique(oct19$trip_id)) {
+  group <- filter(grouped_avl, trip_id == !!trip_id)
+  
+  # Find matching rows in the GTFS trips data based on schd_trip_id
+  match_rows <- gtfs_trips %>%
+    filter(schd_trip_id == as.character(trip_id))
+  
+  # If matching rows are found
+  if (nrow(match_rows) > 0) {
+    # Iterate over each row in the AVL data for the current trip_id
+    for (i in seq_len(nrow(group))) {
+      time_update <- group[i, ]
+      
+      # Check if the stop_id is a valid GTFS stop_id
+      if (time_update$stop_id %in% gtfs_stops) {
+        # Append the stop time information to the data frame
+        stop_times <- rbind(stop_times, data.frame(
+          trip_id = match_rows$trip_id[1],
+          arrival_time = time_update$time,
+          departure_time = time_update$time,
+          stop_id = time_update$stop_id,
+          stop_sequence = time_update$stop_sequence
+        ))
+      }
+    }
+  }
+}
+
+# Save the stop time information as stop_times.csv
+write_csv(stop_times, "stop_times.csv")
+```
+
+Section 3: Create stop_times.csv
+
+- Load valid stop IDs from the GTFS stops.txt file.
+- Initialize a data frame stop_times to store the stop time information.
+- Iterate over each unique trip_id in the AVL data.
+- Find matching rows in the GTFS trips data based on schd_trip_id.
+- If matching rows are found, iterate over each row in the AVL data for the current trip_id.
+- Check if the stop_id is a valid GTFS stop_id.
+- If it is a valid stop_id, append the stop time information to the stop_times data frame.
+- Save the stop_times data frame as stop_times.csv.
+
+```{r}
+# ==============================
+# SECTION 4: Include Rail Trips and Stop Times
+# ==============================
+
+# Filter rail routes from GTFS trips data
+rail <- gtfs_trips %>%
+  filter(route_id %in% c("Red", "Blue", "Brn", "G", "Org", "Pink", "P", "Y")) %>%
+  select(-schd_trip_id)
+
+# Append rail trips to the avl_trip_df data frame
+avl_trip_df <- rbind(avl_trip_df, rail)
+
+# Save the updated trip information as trips.csv
+write_csv(avl_trip_df, "trips.csv")
+
+# Load original GTFS stop_times data for October 19
+original_stopT <- read_csv('gtfs_oct19_stop_times.txt', col_names = TRUE, col_types = cols(
+  trip_id = col_character(),
+  arrival_time = col_character(),
+  departure_time = col_character(),
+  stop_id = col_double(),
+  stop_sequence = col_double()
+))
+
+# Iterate over each row in the rail trips data
+for (i in seq_len(nrow(rail))) {
+  r <- rail[i, ]
+  
+  # Find matching rows in the original GTFS stop_times data based on trip_id
+  new <- original_stopT %>%
+    filter(trip_id == r$trip_id)
+  
+  # Append the matching stop_times rows to the stop_times data frame
+  stop_times <- rbind(stop_times, new)
+}
+
+# Save the updated stop_times data to stop_times.csv
+write_csv(stop_times, "stop_times.csv")
+```
+
+Section 4: Include Rail Trips and Stop Times
+
+- Filter rail routes from the GTFS trips data based on the route_id.
+- Append the rail trips to the avl_trip_df data frame.
+- Save the updated avl_trip_df data frame as trips.csv.
+- Load the original GTFS stop_times data for October 19 from the gtfs_oct19_stop_times.txt file, specifying column types.
+- Iterate over each row in the rail trips data.
+- Find matching rows in the original GTFS stop_times data based on trip_id.
+- Append the matching stop_times rows to the stop_times data frame.
+- Save the updated stop_times data frame as stop_times.csv.

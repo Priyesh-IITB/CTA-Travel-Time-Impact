@@ -1,0 +1,185 @@
+---
+title: "create_ptp_traveltime"
+author: "Priyesh Verma"
+date: "2024-03-17"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# ==============================
+# Load Required Libraries
+# ==============================
+library(dplyr)
+library(readr)
+library(lubridate)
+library(opentripplanner)
+```
+
+
+```{r}
+# ==============================
+# SECTION 1: Set Parameters
+# ==============================
+
+# Set date and time parameters
+year <- 2017
+month <- 10
+day <- 19
+hour <- 8
+minute <- 0
+second <- 0
+
+# Set maximum travel time (in seconds)
+max_time_sec <- 50000
+
+# Set transport modes
+modes <- "WALK,BUS,RAIL,TRAM,TRANSIT,SUBWAY"
+
+# Set clamp initial wait time
+clamp_initial_wait <- 0
+```
+
+Section 1: Set Parameters
+
+- Set the date and time parameters (year, month, day, hour, minute, second).
+- Set the maximum travel time (in seconds).
+- Set the transport modes.
+- Set the clamp initial wait time.
+
+```{r}
+# ==============================
+# SECTION 2: Load Data
+# ==============================
+
+# Load origin points
+input_origins <- read_csv("input_origins.csv")
+
+# Load destination points
+input_dests <- read_csv("input_dests.csv")
+```
+
+Section 2: Load Data
+
+- Load the origin points from the input_origins.csv file.
+- Load the destination points from the input_dests.csv file.
+
+```{r}
+# ==============================
+# SECTION 3: Set Up OpenTripPlanner
+# ==============================
+
+# Set up the OTP router
+otp <- opentripplanner(
+  router = "chicago",
+  graphs = ".",
+  modes = modes,
+  clampInitialWait = clamp_initial_wait
+)
+
+# Set the departure time
+departure_time <- ymd_hms(paste(year, month, day, hour, minute, second, sep = "-"), tz = "UTC")
+```
+
+Section 3: Set Up OpenTripPlanner
+
+- Set up the OTP router with the specified parameters (router name, graphs directory, modes, and clamp initial wait).
+- Set the departure time.
+
+```{r}
+# ==============================
+# SECTION 4: Process Origin-Destination Pairs
+# ==============================
+
+# Initialize a data frame to store results
+results <- data.frame(
+  date = character(),
+  depart_time = character(),
+  origin = character(),
+  destination = character(),
+  avl_found = logical(),
+  walk_distance = numeric(),
+  travel_time = numeric(),
+  boardings = numeric()
+)
+
+# Iterate over origin-destination pairs
+for (i in seq_along(input_origins$GEOID)) {
+  print(paste("Processing origin:", i))
+  
+  # Set the origin point
+  origin <- input_origins[i, ]
+  
+  # Set the destination point
+  destination <- input_dests[i, ]
+  
+  # Perform routing calculation
+  req <- otp_request(
+    otp,
+    fromPlace = c(origin$X, origin$Y),
+    toPlace = c(destination$X, destination$Y),
+    dateTime = departure_time,
+    maxTimeSec = max_time_sec
+  )
+  result <- otp_plan(req)
+  
+  # Check if a valid result was found
+  avl_found <- !is.null(result)
+  
+  # Extract relevant information from the result
+  if (avl_found) {
+    walk_distance <- result$walkDistance
+    travel_time <- result$time
+    boardings <- result$boardings
+  } else {
+    walk_distance <- NA
+    travel_time <- NA
+    boardings <- NA
+  }
+  
+  # Add the result to the data frame
+  results <- rbind(results, data.frame(
+    date = format(departure_time, "%m/%d/%Y"),
+    depart_time = format(departure_time, "%H:%M:%S"),
+    origin = origin$GEOID,
+    destination = destination$GEOID,
+    avl_found = avl_found,
+    walk_distance = walk_distance,
+    travel_time = travel_time,
+    boardings = boardings
+  ))
+}
+```
+
+Section 4: Process Origin-Destination Pairs
+
+- Initialize a data frame to store the results.
+- Iterate over origin-destination pairs.
+
+For each origin-destination pair:
+-- Set the origin and destination points.
+-- Perform the routing calculation using the otp_request and otp_plan functions.
+-- Check if a valid result was found.
+-- Extract relevant information from the result (walk distance, travel time, and number of boardings).
+-- Add the result to the data frame.
+
+```{r}
+# ==============================
+# SECTION 5: Save Results
+# ==============================
+
+# Save the results as a CSV file
+output_file <- paste0("jobs_avl_traveltime_", month, ".", day, "-", hour, ".", minute, ".csv")
+write_csv(results, output_file)
+
+# Print the elapsed time
+print(paste("Elapsed time was", Sys.time() - start_time, "seconds"))
+```
+
+Section 5: Save Results
+
+- Save the results data frame as a CSV file with the filename format jobs_avl_traveltime_<month>.<day>-<hour>.<minute>.csv.
+- Print the elapsed time for the entire process.

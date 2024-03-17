@@ -1,0 +1,254 @@
+---
+title: "get_travel_time"
+author: "Priyesh Verma"
+date: "2024-03-17"
+output: ''
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# Importing Required Libraries
+library(dplyr)
+library(sf)
+library(lubridate)
+library(sqldf)
+```
+
+
+```{r}
+# Section 1: Data Import and Preprocessing
+# Import data
+input_origins <- read.csv("input_origins.csv")
+input_dests <- read.csv("input_dests.csv")
+odx_data <- read.csv("1019_trips_filtered.csv")
+stops_geo <- read.csv("./ODX_files/PT_2017-10-10_stops.csv")
+census_tracts <- read.csv("census_tracts_bounded.csv")
+
+# Convert character columns to appropriate data types
+odx_data$dep_time <- as.POSIXct(odx_data$dep_time, format = "%Y-%m-%d %H:%M:%S")
+odx_data$arr_time <- as.POSIXct(odx_data$arr_time, format = "%Y-%m-%d %H:%M:%S")
+```
+
+Section 1: Data Import and Preprocessing
+
+This section imports the required data files and performs necessary data type conversions.
+
+```{r}
+# Section 2: Create and Connect to Local SQLite Database of ODX Trip Data
+# Create a SQLite database connection
+con <- dbConnect(SQLite(), dbname = "od_trips.db")
+
+# Create a table to store ODX trip data
+dbExecute(con, "CREATE TABLE IF NOT EXISTS od_trips (
+  origin INTEGER,
+  dest INTEGER,
+  dep_time TIMESTAMP,
+  arr_time TIMESTAMP,
+  transfers INTEGER,
+  travel_time INTEGER,
+  UNIQUE (origin, dest, dep_time, arr_time, transfers, travel_time)
+)")
+
+# Insert ODX trip data into the database
+odx_data_rows <- apply(odx_data, 1, function(row) {
+  dbExecute(con, "INSERT OR IGNORE INTO od_trips VALUES (?, ?, ?, ?, ?, ?)",
+            params = as.list(row))
+})
+
+# Commit changes and close the database connection
+dbCommit(con)
+dbDisconnect(con)
+```
+
+Section 2: Create and Connect to Local SQLite Database of ODX Trip Data
+
+- This section creates a SQLite database and a table to store the ODX trip data.
+- The ODX trip data is inserted into the database table.
+
+```{r}
+# Section 3: Add Census Tract Geoid to Input OD Pairs
+# Convert census tract geometries to SF objects
+census_tracts_sf <- st_as_sf(census_tracts, wkt = "geometry")
+
+# Function to find the census tract for a given coordinate
+find_census_tract <- function(lon, lat) {
+  pt <- st_point(c(lon, lat))
+  tract_filter <- st_intersects(census_tracts_sf, pt, sparse = FALSE)
+  if (any(tract_filter)) {
+    census_tracts_sf$geoid10[tract_filter][1]
+  } else {
+    NA_integer_
+  }
+}
+
+# Add census tract Geoid to input OD pairs
+input_origins$start_tract <- vapply(
+  seq_len(nrow(input_origins)),
+  function(i) find_census_tract(input_origins$X[i], input_origins$Y[i]),
+  FUN.VALUE = integer(1)
+)
+
+input_dests$end_tract <- vapply(
+  seq_len(nrow(input_dests)),
+  function(i) find_census_tract(input_dests$X[i], input_dests$Y[i]),
+  FUN.VALUE = integer(1)
+)
+```
+
+Section 3: Add Census Tract Geoid to Input OD Pairs
+
+- This section converts the census tract geometries to SF objects.
+- A function find_census_tract is defined to find the census tract for a given coordinate.
+- The census tract Geoid is added to the input OD pairs dataframes.
+
+```{r}
+# Section 4: Supporting Function to Calculate Lon/Lat Bounds for a Census Tract
+bounds <- function(tract_geoid) {
+  tract <- census_tracts[census_tracts$geoid10 == tract_geoid, ]
+  if (nrow(tract) == 0) {
+    return(NULL)
+  }
+  c(tract$minx, tract$maxx, tract$miny, tract$maxy)
+}
+```
+
+Section 4: Supporting Function to Calculate Lon/Lat Bounds for a Census Tract
+
+This section defines a function bounds to calculate the longitude and latitude bounds for a given census tract Geoid.
+
+```{r}
+# Section 5: Create and Connect to Local SQLite Database of Transit Stops
+# Create a SQLite database connection
+con_s <- dbConnect(SQLite(), dbname = "stops.db")
+
+# Create a table to store transit stop data
+dbExecute(con_s, "CREATE TABLE IF NOT EXISTS stops (
+  stop_id INTEGER UNIQUE,
+  stop_lat REAL,
+  stop_lon REAL
+)")
+
+# Insert transit stop data into the database
+stops_geo_rows <- apply(stops_geo, 1, function(row) {
+  dbExecute(con_s, "INSERT OR IGNORE INTO stops VALUES (?, ?, ?)",
+            params = as.list(row[c("stop_id", "stop_lat", "stop_lon")]))
+})
+
+# Commit changes and close the database connection
+dbCommit(con_s)
+dbDisconnect(con_s)
+```
+
+Section 5: Create and Connect to Local SQLite Database of Transit Stops
+
+- This section creates a SQLite database and a table to store the transit stop data.
+- The transit stop data is inserted into the database table.
+
+```{r}
+# Section 6: OD Pair to ODX Trip Matching
+# Create a SQLite database connection for results
+con_results <- dbConnect(SQLite(), dbname = "results.db")
+
+# Create a table to store travel time results
+dbExecute(con_results, "CREATE TABLE IF NOT EXISTS results_travel_time (
+  time_start INTEGER,
+  time_end INTEGER,
+  start_lat REAL,
+  start_lon REAL,
+  end_lat REAL,
+  end_lon REAL,
+  start_stop INTEGER,
+  end_stop INTEGER,
+  transfers INTEGER,
+  median_tt INTEGER,
+  quartile_tt INTEGER,
+  UNIQUE (time_start, time_end, start_lat, start_lon, end_lat, end_lon, start_stop, end_stop, transfers, median_tt, quartile_tt)
+)")
+
+# Iterate through each desired Origin-Destination pair
+for (i in seq_len(nrow(input_origins))) {
+  print(i)
+
+  # Extract origin and destination lat/lon in geo coordinates
+  or_lat <- input_origins$Y[i]
+  or_lon <- input_origins$X[i]
+  dest_lat <- input_dests$Y[i]
+  dest_lon <- input_dests$X[i]
+  start_id <- input_origins$start_tract[i]
+  end_id <- input_dests$end_tract[i]
+
+  # Get min&max bounds on lat/lon given desired radius
+  origin_bounds <- bounds(start_id)
+  dest_bounds <- bounds(end_id)
+
+  # Case where origin or destination coordinates are not in a census tract
+  if (is.null(origin_bounds) || is.null(dest_bounds)) {
+    dbExecute(con_results, "INSERT OR IGNORE INTO results_travel_time VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              params = list(28800, 28800, or_lat, or_lon, dest_lat, dest_lon, NA, NA, NA, NA, NA))
+    next
+  }
+
+  # Get a list of stops within census tracts
+  or_neighbors <- dbGetQuery(con_s, "SELECT * FROM stops WHERE
+                              stop_lon > ? AND stop_lon < ? AND
+                              stop_lat > ? AND stop_lat < ?",
+                              params = origin_bounds)
+
+  dest_neighbors <- dbGetQuery(con_s, "SELECT * FROM stops WHERE
+                                stop_lon > ? AND stop_lon < ? AND
+                                stop_lat > ? AND stop_lat < ?",
+                                params = dest_bounds)
+
+  # Find all possible trips in ODX database that match neighboring origin and destination id
+  matching_trips <- dbGetQuery(con, "SELECT * FROM od_trips WHERE
+                                origin IN (?) AND dest IN (?)",
+                                params = list(or_neighbors$stop_id, dest_neighbors$stop_id))
+
+  if (nrow(matching_trips) > 0) {
+    # Filter trips for morning rush hour (8 AM +/- 2 hours)
+    matching_trips <- matching_trips[abs(hour(matching_trips$dep_time) - 8) < 2, ]
+
+    # Sort matching trips by travel time
+    matching_trips <- matching_trips[order(matching_trips$travel_time), ]
+
+    # Calculate 75th percentile and median travel time indices
+    quartile_index <- ceiling(0.75 * nrow(matching_trips))
+    median_index <- ceiling(0.5 * nrow(matching_trips))
+
+    # Get the 75th percentile and median travel time trips
+    q_trip <- matching_trips[quartile_index, ]
+    m_trip <- matching_trips[median_index, ]
+
+    # Insert results into the results_travel_time table
+    dbExecute(con_results, "INSERT OR IGNORE INTO results_travel_time VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              params = list(q_trip$dep_time, q_trip$arr_time, or_lat, or_lon, dest_lat, dest_lon,
+                            q_trip$origin, q_trip$dest, q_trip$transfers, m_trip$travel_time, q_trip$travel_time))
+  }
+
+  dbCommit(con_results)
+}
+
+# Visualize results
+res <- dbGetQuery(con_results, "SELECT * FROM results_travel_time")
+print(res)
+
+# Close database connections
+dbDisconnect(con_results)
+dbDisconnect(con)
+dbDisconnect(con_s)
+```
+
+Section 6: OD Pair to ODX Trip Matching
+- This section creates a SQLite database and a table to store the travel time results.
+
+It iterates through each desired Origin-Destination pair and performs the following steps:
+- Extract origin and destination lat/lon coordinates.
+- Get the min&max bounds on lat/lon for the origin and destination census tracts.
+- Get a list of stops within the origin and destination census tracts.
+- Find all possible trips in the ODX database that match the neighboring origin and destination stops.
+- Filter trips for morning rush hour (8 AM +/- 2 hours).
+- Sort matching trips by travel time and calculate the 75th percentile and median travel time.
+- Insert the results into the results_travel_time table.

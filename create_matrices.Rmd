@@ -1,0 +1,165 @@
+---
+title: "create_matrices"
+author: "Priyesh Verma"
+date: "2024-03-16"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# ==============================
+# Load Required Libraries
+# ==============================
+library(dplyr)
+library(readr)
+library(lubridate)
+library(opentripplanner)
+```
+
+
+```{r}
+# ==============================
+# SECTION 1: Set Parameters
+# ==============================
+
+# Set date and time parameters
+year <- 2017
+month <- 10
+day <- 19
+hour <- 8
+minute <- 0
+second <- 0
+
+# Set maximum travel time (in seconds)
+max_time_sec <- 50000
+
+# Set transport modes
+modes <- "WALK,BUS,RAIL,TRAM,TRANSIT,SUBWAY"
+
+# Set clamp initial wait time
+clamp_initial_wait <- 0
+```
+
+Section 1: Set Parameters
+
+- Set the date and time parameters (year, month, day, hour, minute, second).
+- Set the maximum travel time (in seconds).
+- Set the transport modes.
+- Set the clamp initial wait time.
+
+```{r}
+# ==============================
+# SECTION 2: Load Data
+# ==============================
+
+# Load origin and destination points
+odpoints <- read_csv("ODpoints_tracts.csv")
+```
+
+Section 2: Load Data
+
+- Load the origin and destination points from the ODpoints_tracts.csv file.
+
+```{r}
+# ==============================
+# SECTION 3: Set Up OpenTripPlanner
+# ==============================
+
+# Set up the OTP router
+otp <- opentripplanner(
+  router = "chicago",
+  graphs = ".",
+  modes = modes,
+  clampInitialWait = clamp_initial_wait
+)
+
+# Set the departure time
+departure_time <- ymd_hms(paste(year, month, day, hour, minute, second, sep = "-"), tz = "UTC")
+```
+
+Section 3: Set Up OpenTripPlanner
+
+- Set up the OTP router with the specified parameters (router name, graphs directory, modes, and clamp initial wait).
+- Set the departure time.
+
+```{r}
+# ==============================
+# SECTION 4: Perform Routing Calculations
+# ==============================
+
+# Initialize a data frame to store results
+results <- data.frame(
+  depart_time = character(),
+  origin = character(),
+  destination = character(),
+  walk_distance = numeric(),
+  travel_time = numeric(),
+  boardings = numeric()
+)
+
+# Iterate over origin points
+for (origin in odpoints$GEOID) {
+  # Set the origin point
+  req <- otp_request(
+    otp,
+    fromPlace = c(odpoints$X[odpoints$GEOID == origin], odpoints$Y[odpoints$GEOID == origin]),
+    dateTime = departure_time,
+    maxTimeSec = max_time_sec
+  )
+  
+  # Perform routing calculation
+  spt <- otp_plan(req)
+  
+  # Check if a valid result was found
+  if (!is.null(spt)) {
+    # Evaluate the SPT for all destination points
+    result <- otp_eval(spt, odpoints)
+    
+    # Add the results to the data frame
+    for (r in result) {
+      results <- rbind(results, data.frame(
+        depart_time = format(departure_time, "%H:%M:%S"),
+        origin = r$origin,
+        destination = r$destination,
+        walk_distance = r$walkDistance,
+        travel_time = r$time,
+        boardings = r$boardings
+      ))
+    }
+  }
+}
+```
+
+Section 4: Perform Routing Calculations
+
+- Initialize a data frame to store the results.
+- Iterate over origin points.
+
+For each origin point:
+-- Set the origin point and create an OTP request.
+-- Perform the routing calculation using the otp_plan function.
+-- Check if a valid result was found.
+-- If a valid result was found, evaluate the SPT for all destination points using the otp_eval function.
+-- Add the results to the data frame.
+
+```{r}
+
+# ==============================
+# SECTION 5: Save Results
+# ==============================
+
+# Save the results as a CSV file
+output_file <- paste0("traveltime_matrix_", month, ".", day, "-", hour, ".", minute, ".csv")
+write_csv(results, output_file)
+
+# Print the elapsed time
+print(paste("Elapsed time was", Sys.time() - start_time, "seconds"))
+```
+
+Section 5: Save Results
+
+- Save the results data frame as a CSV file with the filename format traveltime_matrix_<month>.<day>-<hour>.<minute>.csv.
+- Print the elapsed time for the entire process.

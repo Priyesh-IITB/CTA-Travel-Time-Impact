@@ -1,0 +1,246 @@
+---
+title: "avl_check2"
+author: "Priyesh Verma"
+date: "2024-03-16"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# ==============================
+# Import Data Files
+# ==============================
+
+# Import raw AVL data for October
+oct_avl_raw <- read_csv("October_avl_data.csv")
+
+# Import GTFS trips data
+gtfs_trips <- read_csv("gtfs_trips_oct_17.txt",
+                       col_types = cols(
+                         route_id = col_character(),
+                         service_id = col_character(),
+                         trip_id = col_character(),
+                         schd_trip_id = col_character()
+                       ))
+
+# Import AVL trips data
+avl_trips <- read_csv("trips.txt")
+
+# Import GTFS calendar data
+gtfs_path <- "partridge_data/gtfs-10-22-17/"
+calendar <- read_csv(file.path(gtfs_path, "calendar.txt"))
+calendar_dates <- read_csv(file.path(gtfs_path, "calendar_dates.txt"))
+gtfs_trips <- read_csv(file.path(gtfs_path, "trips.txt"))
+```
+
+```{r}
+# Load required libraries
+library(dplyr)
+library(readr)
+library(lubridate)
+library(tqdm)
+```
+
+```{r}
+# ==============================
+# Data Cleaning Function
+# ==============================
+
+CTA_avl_data_cleaning <- function(avl_raw_data) {
+  # Function to clean AVL data
+  
+  # Convert event_time to datetime and extract day
+  avl_raw_data <- avl_raw_data %>%
+    mutate(day = as.Date(event_time) %>% day())
+  
+  # Sort data by route_id, trip_id, day, stop_sequence, and event_time
+  avl_raw_data <- avl_raw_data %>%
+    arrange(route_id, trip_id, day, stop_sequence, event_time) %>%
+    as.data.frame()
+  
+  # Combine ron & fon and roff & foff
+  avl_raw_data <- avl_raw_data %>%
+    mutate(pax_on = ron + fon,
+           pax_off = roff + foff,
+           row = row_number()) %>%
+    select(-ron, -fon, -roff, -foff)
+  
+  # Drop data without stop_id, trip_id, bus_id
+  # Drop stop event type 5
+  avl_raw_data <- avl_raw_data %>%
+    filter(!is.na(stop_id) & !is.na(trip_id) & !is.na(bus_id) & stop_event_type != 5) %>%
+    mutate(trip_date = if_else(stop_event_type %in% c(3, 4),
+                               paste0(as.character(trip_id), "-", date(event_time)),
+                               NA_character_)) %>%
+    filter(!is.na(trip_date)) %>%
+    select(-row)
+  
+  # If two rows represent the stop event at the same bus stop, keep the first one
+  avl_raw_data <- avl_raw_data %>%
+    arrange(desc(trip_date), desc(stop_id)) %>%
+    distinct(trip_date, stop_id, .keep_all = TRUE) %>%
+    arrange(trip_date, stop_id)
+  
+  # Processed passenger loading with raw passenger_on and passenger_off
+  avl_raw_data <- avl_raw_data %>%
+    group_by(trip_id) %>%
+    mutate(loading = case_when(
+      row_number() == 1 ~ pax_on,
+      row_number() == n() ~ 0,
+      lead(trip_date) != trip_date ~ 0,
+      lead(stop_id) == stop_id ~ max(0, lag(loading, default = 0) + pax_on - pax_off),
+      TRUE ~ pax_on
+    )) %>%
+    ungroup() %>%
+    select(-pax_on, -pax_off)
+  
+  return(avl_raw_data)
+}
+```
+
+```{r}
+# ==============================
+# Data Processing
+# ==============================
+
+# Read AVL data
+oct_avl_raw <- read_csv("October_avl_data.csv")
+
+# Clean AVL data
+xiaotong_avl <- CTA_avl_data_cleaning(oct_avl_raw)
+
+# Save cleaned AVL data to CSV
+write_csv(xiaotong_avl, "xiaotong_avl.csv")
+
+# Read cleaned AVL data from CSV
+xiaotong_avl <- read_csv("xiaotong_avl.csv") %>%
+  mutate(day = as.Date(X1) %>% day())
+
+# Print shape and preview data
+print(dim(xiaotong_avl))
+head(xiaotong_avl, 10)
+```
+
+```{r}
+# ==============================
+# Extract October 19th Data
+# ==============================
+
+# Extract rows where date is October 19th
+oct_19 <- xiaotong_avl %>%
+  filter(day == 19)
+
+# Split trip_id and date string column, create new column 'trip_id'
+oct_19 <- oct_19 %>%
+  mutate(trip_id = str_extract(trip_date, "^\\d+")) %>%
+  select(-trip_date)
+
+# Drop rows with duplicate trip and route_ids
+oct_19_avl_trips <- oct_19 %>%
+  distinct(trip_id, route_id, .keep_all = TRUE)
+
+# Save to CSV
+write_csv(oct_19_avl_trips, "xiaotong_oct19.csv")
+```
+
+```{r}
+# ==============================
+# Merge with GTFS Data
+# ==============================
+
+# Read October 19 CSV and GTFS trips.txt
+oct_19 <- read_csv("xiaotong_oct19.csv")
+gtfs_trips <- read_csv("gtfs_trips_oct_17.txt",
+                       col_types = cols(
+                         route_id = col_character(),
+                         service_id = col_character(),
+                         trip_id = col_character(),
+                         schd_trip_id = col_character()
+                       ))
+
+# Check unique route_ids
+print(length(unique(oct_19$route_id)))
+print(length(unique(gtfs_trips$route_id)))
+
+# Keep only AVL trip_ids that exist in GTFS trip_ids
+avl_trip_df <- data.frame(route_id = character(),
+                          service_id = character(),
+                          trip_id = character())
+
+avl_not_in_gtfs <- data.frame()
+
+for (i in tqdm(seq_len(nrow(oct_19)))) {
+  row <- oct_19[i, ]
+  matches <- gtfs_trips %>%
+    filter(schd_trip_id == as.character(row$trip_id))
+  
+  if (nrow(matches) > 0) {
+    avl_trip_df <- rbind(avl_trip_df,
+                         matches %>%
+                           select(route_id, service_id, trip_id))
+  } else {
+    avl_not_in_gtfs <- rbind(avl_not_in_gtfs, row)
+  }
+}
+
+# Info about AVL trips not found in GTFS
+print(unique(avl_not_in_gtfs$X7))
+print(length(unique(avl_not_in_gtfs$trip_id)))
+print(unique(oct_19$X7))
+print(length(unique(oct_19$trip_id)))
+print(unique(gtfs_trips$service_id))
+```
+
+
+```{r}
+# ==============================
+# Filter Valid Service IDs
+# ==============================
+
+# Get GTFS data
+gtfs_path <- "partridge_data/gtfs-10-22-17/"
+calendar <- read_csv(file.path(gtfs_path, "calendar.txt"))
+calendar_dates <- read_csv(file.path(gtfs_path, "calendar_dates.txt"))
+gtfs_trips <- read_csv(file.path(gtfs_path, "trips.txt"))
+avl_trips <- read_csv("trips.txt")
+
+# Convert service_id to integer
+gtfs_trips <- gtfs_trips %>%
+  mutate(service_id = as.integer(service_id))
+avl_trips <- avl_trips %>%
+  mutate(service_id = as.integer(service_id))
+
+# Get valid service IDs for 10/19/2017 (Thursday)
+oct19 <- as.Date("2017-10-19")
+valid_ids <- calendar %>%
+  filter(thursday == 1,
+         start_date <= oct19,
+         end_date >= oct19)
+serviceIDs_10_19 <- unique(valid_ids$service_id)
+
+print(serviceIDs_10_19)
+
+# Get exceptions from calendar_dates
+exception1 <- calendar_dates %>%
+  filter(date == oct19, exception_type == 1) %>%
+  pull(service_id)
+
+exception2 <- calendar_dates %>%
+  filter(date == oct19, exception_type == 2) %>%
+  pull(service_id)
+
+valid_services <- setdiff(serviceIDs_10_19, exception2)
+valid_services <- union(valid_services, exception1)
+
+# Filter all trips with service_id in valid_services
+valid_gtfs_trips <- gtfs_trips %>%
+  filter(service_id %in% valid_services)
+
+print(length(unique(valid_gtfs_trips$trip_id)))
+print(nrow(avl_trips))
+print(unique(avl_trips$service_id))
+```
+

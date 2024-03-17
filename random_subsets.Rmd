@@ -1,0 +1,52 @@
+---
+title: "random_subsets"
+author: "Priyesh Verma"
+date: "2024-03-17"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# Section 1: Load Required Libraries
+library(readr)
+library(dplyr)
+```
+
+Section 1: Load Required Libraries
+
+This section loads the required libraries: readr for reading CSV files and dplyr for data manipulation.
+
+```{r}
+# Section 2: Read Census Tracts Origin Data
+census_tracts <- "ODpoints_tracts.csv"
+ODtracts_df <- read_csv(census_tracts)
+```
+
+Section 2: Read Census Tracts Origin Data
+
+This section reads the census tracts origin data from the "ODpoints_tracts.csv" file using the read_csv function from the readr package and stores it in the ODtracts_df data frame.
+
+```{r}
+# Section 3: Sample and Write to CSV
+for (percentage in seq(10, 100, 10)) {
+ sample_percentage <- percentage / 100
+ mysample <- ODtracts_df %>%
+   sample_frac(sample_percentage)
+ 
+ output_file <- sprintf("%d%%ODpoints.csv", percentage)
+ write_csv(mysample, output_file, col_names = TRUE)
+}
+```
+
+Section 3: Sample and Write to CSV
+
+This section uses a for loop to iterate over percentages from 10% to 100% in increments of 10%.
+
+Inside the loop:
+- The sample_percentage is calculated by dividing the current percentage by 100.
+- The sample_frac function from dplyr is used to sample a fraction of the ODtracts_df data frame based on the sample_percentage.
+- The sprintf function is used to generate the output file name in the format "%d%%ODpoints.csv", where %d is replaced with the current percentage value.
+- The sampled data frame is written to the output file using the write_csv function from the readr package, with column names included (col_names = TRUE).

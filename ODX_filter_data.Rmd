@@ -1,0 +1,264 @@
+---
+title: "ODX_filter_data"
+author: "Priyesh Verma"
+date: "2024-03-17"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# Load required libraries
+library(arrow)
+library(dplyr)
+library(tidyr)
+```
+
+```{r}
+# Load the data
+odx_formated <- read_parquet('October 19/tmstp_oct_odx.snappy.parquet', columns = c('trans_status_key', 'boarding_stop', 'inferred_alighting_gtfs_stop', 'transfer_inference', 'journey_size', 'transaction_dtm', 'alighting_time'))
+odx_df <- as.data.frame(odx_formated)
+```
+
+
+```{r}
+# Extract date and time information
+odx_df <- odx_df %>%
+  mutate(str_transTime = as.character(transaction_dtm),
+         trans_date = substr(str_transTime, 1, 10),
+         trans_time = substr(str_transTime, 12, 19),
+         str_alightTime = as.character(alighting_time),
+         alight_date = substr(str_alightTime, 1, 10),
+         alight_time = substr(str_alightTime, 12, 19))
+
+# Filter data for October 19th
+trips <- odx_df %>%
+  filter(trans_date == '2017-10-19') %>%
+  mutate(journey_size = as.numeric(journey_size))
+
+# Separate direct trips and transfer trips
+direct_trips <- trips %>%
+  filter(journey_size == 1 & alight_date == '2017-10-19' & transfer_inference == 'Destination') %>%
+  select(boarding_stop, inferred_alighting_gtfs_stop, transaction_dtm, alighting_time)
+
+trans_trips <- trips %>%
+  filter(journey_size > 1) %>%
+  select(boarding_stop, inferred_alighting_gtfs_stop, transaction_dtm, alighting_time, transfer_inference)
+
+# Display shape of trips
+cat("Shape of all trips:", nrow(trips), "\n")
+cat("Shape of direct trips:", nrow(direct_trips), "\n")
+cat("Shape of transfer trips:", nrow(trans_trips), "\n")
+
+# Process transfer trips to find number of destinations
+trans_test <- trans_trips %>%
+  filter(alight_date == '2017-10-19')
+
+num_dests <- trans_trips %>%
+  filter(transfer_inference == 'Destination')
+
+test_num <- trans_test %>%
+  filter(transfer_inference == 'Destination')
+
+cat("Shape of transfer trips on October 19th:", nrow(trans_test), "\n")
+cat("Number of destinations in transfer trips:", nrow(num_dests), "\n")
+cat("Test number of destinations:", nrow(test_num), "\n")
+
+# Define function to calculate travel time
+calculate_travel_time <- function(dep_time, arr_time) {
+  dep_time <- as.POSIXct(dep_time)
+  arr_time <- as.POSIXct(arr_time)
+  diff <- difftime(arr_time, dep_time, units = "secs")
+  return(as.numeric(diff))
+}
+
+# Extract relevant information for direct trips
+ODX_trips <- list(origin = vector(),
+                   dest = vector(),
+                   dep_time = vector(),
+                   arr_time = vector(),
+                   transfers = vector(),
+                   travel_time = vector())
+
+for (i in 1:nrow(direct_trips)) {
+  trans_time <- calculate_travel_time(direct_trips[i, 'transaction_dtm'], direct_trips[i, 'alighting_time'])
+  ODX_trips$origin <- append(ODX_trips$origin, direct_trips[i, 'boarding_stop'])
+  ODX_trips$dest <- append(ODX_trips$dest, direct_trips[i, 'inferred_alighting_gtfs_stop'])
+  ODX_trips$dep_time <- append(ODX_trips$dep_time, direct_trips[i, 'transaction_dtm'])
+  ODX_trips$arr_time <- append(ODX_trips$arr_time, direct_trips[i, 'alighting_time'])
+  ODX_trips$transfers <- append(ODX_trips$transfers, direct_trips[i, 'journey_size'] - 1)
+  ODX_trips$travel_time <- append(ODX_trips$travel_time, trans_time)
+}
+
+# Display number of direct trips
+cat("Number of direct trips:", length(ODX_trips$origin), "\n")
+
+# Extract relevant information for transfer trips
+ODX_trans_trips <- list(origin = vector(),
+                        dest = vector(),
+                        dep_time = vector(),
+                        arr_time = vector(),
+                        transfers = vector(),
+                        travel_time = vector())
+
+for (i in 1:nrow(trans_trips)) {
+  if (trans_trips[i, 'journey_size'] > 1) {
+    dep_time <- trans_trips[i, 'transaction_dtm']
+    
+    if (i > 1 && trans_trips[i - 1, 'transfer_inference'] == 'Destination' && trans_trips[i, 'transfer_inference'] == 'Transfer') {
+      ODX_trans_trips$origin <- append(ODX_trans_trips$origin, trans_trips[i, 'boarding_stop'])
+      ODX_trans_trips$dep_time <- append(ODX_trans_trips$dep_time, dep_time)
+    }
+    
+    if (trans_trips[i, 'transfer_inference'] == 'Destination' && trans_trips[i - 1, 'transfer_inference'] == 'Transfer') {
+      ODX_trans_trips$dest <- append(ODX_trans_trips$dest, trans_trips[i, 'inferred_alighting_gtfs_stop'])
+      ODX_trans_trips$transfers <- append(ODX_trans_trips$transfers, trans_trips[i, 'journey_size'] - 1)
+      
+      if (trans_trips[i, 'alight_date'] == '2017-10-19') {
+        ODX_trans_trips$arr_time <- append(ODX_trans_trips$arr_time, trans_trips[i, 'alighting_time'])
+        trans_time <- calculate_travel_time(dep_time, trans_trips[i, 'alighting_time'])
+        ODX_trans_trips$travel_time <- append(ODX_trans_trips$travel_time, trans_time)
+      } else {
+        ODX_trans_trips$arr_time <- append(ODX_trans_trips$arr_time, NA)
+        ODX_trans_trips$travel_time <- append(ODX_trans_trips$travel_time, NA)
+      }
+    }
+  }
+}
+
+# Display number of transfer trips
+cat("Number of transfer trips:", length(ODX_trans_trips$origin), "\n")
+
+# Combine direct and transfer trips
+ODX_trips_all <- list(origin = c(ODX_trips$origin, ODX_trans_trips$origin),
+                      dest = c(ODX_trips$dest, ODX_trans_trips$dest),
+                      dep_time = c(ODX_trips$dep_time, ODX_trans_trips$dep_time),
+                      arr_time = c(ODX_trips$arr_time, ODX_trans_trips$arr_time),
+                      transfers = c(ODX_trips$transfers, ODX_trans_trips$transfers),
+                      travel_time = c(ODX_trips$travel_time, ODX_trans_trips$travel_time))
+
+# Create DataFrame and drop NA values
+ODX_final_trips <- as.data.frame(ODX_trips_all)
+ODX_final_trips <- na.omit(ODX_final_trips)
+
+# Save to CSV
+write.csv(ODX_final_trips, "1019_trips_filtered.csv", row.names = FALSE)
+cat("Shape of final trips:", nrow(ODX_final_trips), "\n")
+
+# Define function to calculate bounds
+bounds <- function(tract_geoid) {
+  tract <- census_tracts[census_tracts$geoid10 == tract_geoid, ]
+  if (nrow(tract) == 0) {
+    return(NULL)
+  } else {
+    return(c(tract$minx, tract$maxx, tract$miny, tract$maxy))
+  }
+}
+
+# Create and connect local database of transit stops
+stops_db <- "stops.db"
+conn_s <- DBI::dbConnect(RSQLite::SQLite(), stops_db)
+DBI::dbWriteTable(conn_s, "stops", stops_geo, overwrite = TRUE)
+
+# Create and connect local database of ODX trip data
+od_trips_db <- "od_trips.db"
+conn <- DBI::dbConnect(RSQLite::SQLite(), od_trips_db)
+DBI::dbWriteTable(conn, "od_trips", odx_data, overwrite = TRUE)
+
+# Add column to input OD pairs of geoid of census tract it is in
+input_origins$start_tract <- sapply(input_origins$X, function(x) {
+  p_start <- sf::st_point(c(x, input_origins$Y))
+  tract <- which(sf::st_within(p_start, cgdf))
+  if (length(tract) > 0) {
+    return(cgdf$geoid10[tract])
+  } else {
+    return(NA)
+  }
+})
+
+input_dests$end_tract <- sapply(input_dests$X, function(x) {
+  p_end <- sf::st_point(c(x, input_dests$Y))
+  tract <- which(sf::st_within(p_end, cgdf))
+  if (length(tract) > 0) {
+    return(cgdf$geoid10[tract])
+  } else {
+    return(NA)
+  }
+})
+
+# Supporting function to calculate lon/lat min&max bounds given a geo-coordinate
+bounds <- function(tract_geoid) {
+  tract <- census_tracts[census_tracts$geoid10 == tract_geoid, ]
+  if (nrow(tract) == 0) {
+    return(NULL)
+  } else {
+    return(c(tract$minx, tract$maxx, tract$miny, tract$maxy))
+  }
+}
+
+# Create and connect a local database of transit stops and corresponding lon/lat
+stops_db <- "stops.db"
+conn_s <- DBI::dbConnect(RSQLite::SQLite(), stops_db)
+DBI::dbWriteTable(conn_s, "stops", stops_geo, overwrite = TRUE)
+
+# OD pair -> ODX trip matching
+# Iterate through each desired Origin-Destination pair
+for (i in 1:nrow(input_origins)) {
+  # Extract origin and destination lat/lon in geo coordinates
+  or_lat <- input_origins$Y[i]
+  or_lon <- input_origins$X[i]
+  dest_lat <- input_dests$Y[i]
+  dest_lon <- input_dests$X[i]
+  start_id <- input_origins$start_tract[i]
+  end_id <- input_dests$end_tract[i]
+  
+  # Get min&max bounds on lat/lon given desired radius
+  origin_bounds <- bounds(start_id)
+  dest_bounds <- bounds(end_id)
+  
+  # Case where origin or destination coordinates are not in a census tract
+  if (is.null(origin_bounds) || is.null(dest_bounds)) {
+    DBI::dbExecute(conn_results, "INSERT OR IGNORE INTO results_travel_time VALUES (?,?,?,?,?,?,?,?,?,?,?)", 
+                    list(28800, 28800, or_lat, or_lon, dest_lat, dest_lon, NULL, NULL, NULL, NULL, NULL))
+  } else {
+    # Get a list of stops within census tract
+    or_neighbors <- DBI::dbGetQuery(conn_s, "SELECT * FROM stops WHERE (stop_lon > origin_bounds[1] AND stop_lon < origin_bounds[2]) AND (stop_lat > origin_bounds[3] AND stop_lat < origin_bounds[4])")
+    dest_neighbors <- DBI::dbGetQuery(conn_s, "SELECT * FROM stops WHERE (stop_lon > dest_bounds[1] AND stop_lon < dest_bounds[2]) AND (stop_lat > dest_bounds[3] AND stop_lat < dest_bounds[4])")
+    
+    # Find all possible trips in ODX database that match neighboring origin and destination id
+    matching_trips <- list()
+    for (origin in or_neighbors) {
+      for (dest in dest_neighbors) {
+        matching_OD <- DBI::dbGetQuery(conn, "SELECT * FROM od_trips WHERE origin = ? AND dest = ?", c(origin$stop_id, dest$stop_id))
+        if (nrow(matching_OD) > 0) {
+          matching_trips <- c(matching_trips, matching_OD)
+        }
+      }
+    }
+    
+    if (length(matching_trips) > 0) {
+      matching_trips <- do.call(rbind, matching_trips)
+      matching_trips <- matching_trips[order(matching_trips$travel_time), ]
+      quartile_index <- floor(0.75 * nrow(matching_trips))
+      median_index <- floor(0.5 * nrow(matching_trips))
+      q_trip <- matching_trips[quartile_index, ]
+      m_trip <- matching_trips[median_index, ]
+      DBI::dbExecute(conn_results, "INSERT OR IGNORE INTO results_travel_time VALUES (?,?,?,?,?,?,?,?,?,?,?)", 
+                      list(q_trip$dep_time, q_trip$arr_time, or_lat, or_lon, dest_lat, dest_lon, q_trip$origin, q_trip$dest, q_trip$transfers, m_trip$travel_time, q_trip$travel_time))
+    }
+  }
+}
+
+# Convert results database to Python DataFrame
+results <- DBI::dbGetQuery(conn_results, "SELECT * FROM results_travel_time")
+write.csv(results, "results_travel_time.csv", row.names = FALSE)
+print(paste("Shape of results:", nrow(results)))
+
+# Plot histograms of median and quartile travel times
+par(mfrow = c(2, 1))
+hist(results$median_tt, breaks = 100, main = "ODX Median Travel Times Histogram", xlab = "Travel Time (Seconds)", ylab = "Trips")
+hist(results$quartile_tt, breaks = 100, main = "ODX Quartile Travel Times Histogram", xlab = "Travel Time (Seconds)", ylab = "Trips")
+```
+
